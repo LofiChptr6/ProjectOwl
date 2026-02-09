@@ -100,7 +100,7 @@ ProjectOwl/
 | Rolling-window stride | `WINDOW_STRIDE` |
 | Moving-average windows | `MA_WINDOWS`, `WMA_WINDOWS`, `EMA_WINDOWS` |
 | ARMA / GARCH orders | `ARMA_ORDER`, `GARCH_ORDER` |
-| Classification thresholds | `CATEGORY_THRESHOLDS`, `NUM_CATEGORIES` |
+| Classification | `NUM_CATEGORIES` (derived thresholds, no pre-set) |
 | Normalisation method | `NORMALIZATION_METHOD` |
 | Stock universe | `TOP_STOCKS_COUNT`, `MIN_MARKET_CAP` |
 
@@ -140,7 +140,13 @@ ProjectOwl/
 - Animated MP4 trajectory videos showing a stock's rolling-window path
   through embedding space (`owl/visualization/tsne_video.py`).
 
-### 6. Orchestration Dashboard (`owl/orchestration/dashboard.py`)
+### 6. Path-based Cluster Labeler (Streamlit)
+- Train an **autoencoder** on paths (no return-based labels): `python scripts/train_clusters.py`
+- Launch the **labeler GUI**: `streamlit run scripts/run_cluster_labeler.py`
+- View example curves from each discovered cluster and assign custom names
+- Labels are saved to `outputs/clusters/cluster_names.json`
+
+### 7. Orchestration Dashboard (`owl/orchestration/dashboard.py`)
 - Dash/Plotly web app at `http://localhost:8050`.
 - Live training loss, validation accuracy, pipeline throughput, bottleneck chart.
 - Launch: `python -m owl.orchestration.dashboard` or pass `--dashboard` to train.
@@ -156,6 +162,10 @@ ProjectOwl/
 | SHARADAR/SF1 (MRQ) | Revenue, EBITDA, EPS, margins, ratios | quarterly | 1 day |
 
 ---
+
+## Ticker config
+
+The project uses `config/tickers_by_sector.csv` with 200 US large-cap tickers across 11 sectors. The query engine loads tickers from this file by default. Sector token embeddings condition the CNN model (see `owl/models/sector_embedding.py`).
 
 ## Prerequisites
 

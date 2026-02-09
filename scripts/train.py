@@ -111,12 +111,14 @@ def main():
     )
 
     # feature importance (use a sample batch)
-    sample_batch, _ = next(iter(val_loader))
+    batch = next(iter(val_loader))
+    sector_idx = batch[2] if len(batch) > 2 else None
     plot_feature_importance(
-        trainer.model, sample_batch,
+        trainer.model, batch[0],
         feature_names=pipeline.feature_columns,
         device=trainer.device,
         save_path=report_dir / "feature_importance.png",
+        sector_idx=sector_idx,
     )
 
     # category examples

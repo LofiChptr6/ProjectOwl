@@ -27,7 +27,13 @@ import plotly.express as px
 import plotly.graph_objects as go
 from dash import Input, Output, dcc, html
 
-from owl.config import DASHBOARD_PORT, DASHBOARD_UPDATE_INTERVAL_MS
+from pathlib import Path
+
+from owl.config import (
+    DASHBOARD_PORT,
+    DASHBOARD_UPDATE_INTERVAL_MS,
+    REPORT_DIR,
+)
 from owl.data.db import get_engine
 
 logger = logging.getLogger(__name__)
@@ -66,14 +72,37 @@ app.layout = dbc.Container(fluid=True, children=[
                 dbc.Col(dcc.Graph(id="acc-graph"), md=4),
             ]),
         ]),
-        # ── Tab 2: Throughput & bottleneck ────────────────────────────────
-        dbc.Tab(label="Pipeline Throughput", children=[
+        # ── Tab 2: Worker load vs model ingestion ────────────────────────
+        dbc.Tab(label="Worker vs Ingestion", children=[
+            dbc.Row(dbc.Col(html.P(
+                "Data wait = time waiting for DataLoader workers; Compute = GPU time. "
+                "If data wait dominates, increase num_workers or cache.",
+                className="text-muted small"))),
+            dbc.Row([
+                dbc.Col(dcc.Graph(id="worker-vs-ingestion-graph"), md=12),
+            ]),
             dbc.Row([
                 dbc.Col(dcc.Graph(id="throughput-graph"), md=6),
                 dbc.Col(dcc.Graph(id="bottleneck-graph"), md=6),
             ]),
         ]),
-        # ── Tab 3: Raw metrics table ─────────────────────────────────────
+        # ── Tab 3: Model architecture ────────────────────────────────────
+        dbc.Tab(label="Model Architecture", children=[
+            dbc.Row([
+                dbc.Col([
+                    html.Label("Model:", className="me-2"),
+                    dcc.Dropdown(
+                        id="model-arch-dropdown",
+                        options=[{"label": "CNN", "value": "cnn"}, {"label": "Transformer", "value": "transformer"}],
+                        value="cnn",
+                        clearable=False,
+                        style={"width": "120px"},
+                    ),
+                ], width=2),
+            ], className="mb-2"),
+            html.Div(id="model-arch-content", className="p-3"),
+        ]),
+        # ── Tab 4: Raw metrics table ─────────────────────────────────────
         dbc.Tab(label="Raw Metrics", children=[
             html.Div(id="metrics-table", className="p-3"),
         ]),
@@ -133,6 +162,42 @@ def update_training_charts(_):
 
 
 @app.callback(
+    Output("worker-vs-ingestion-graph", "figure"),
+    Input("tick", "n_intervals"),
+)
+def update_worker_vs_ingestion(_):
+    """Real-time: time waiting for data workers vs GPU compute time per batch."""
+    df = _query("""
+        SELECT id, timestamp, epoch, batch, metric_name, metric_value
+        FROM training_metrics
+        WHERE metric_name IN ('data_wait_sec', 'compute_sec')
+        ORDER BY id DESC LIMIT 1500
+    """)
+    if df.empty:
+        fig = go.Figure().update_layout(
+            title="Worker load vs model ingestion (no data yet)",
+            template="plotly_dark",
+        )
+        return fig
+    df = df.sort_values("id")
+    # One line per metric
+    fig = go.Figure(layout=dict(title="Worker load vs model ingestion", template="plotly_dark"))
+    for name, label in [("data_wait_sec", "Data wait (workers)"), ("compute_sec", "GPU compute")]:
+        sub = df[df["metric_name"] == name]
+        if not sub.empty:
+            fig.add_trace(go.Scatter(
+                x=sub["id"], y=sub["metric_value"],
+                name=label, mode="lines",
+            ))
+    fig.update_layout(
+        xaxis_title="Batch (metric id)",
+        yaxis_title="Seconds",
+        legend=dict(orientation="h"),
+    )
+    return fig
+
+
+@app.callback(
     Output("throughput-graph", "figure"),
     Output("bottleneck-graph", "figure"),
     Input("tick", "n_intervals"),
@@ -174,6 +239,39 @@ def update_throughput_charts(_):
 
 
 @app.callback(
+    Output("model-arch-content", "children"),
+    Input("tick", "n_intervals"),
+    Input("model-arch-dropdown", "value"),
+)
+def update_model_arch(_, model_name):
+    """Display torchinfo summary for the selected model."""
+    if not model_name:
+        return html.P("Select a model.", className="text-muted")
+    path = Path(REPORT_DIR) / model_name / "model_arch.txt"
+    if not path.exists():
+        return html.P(
+            f"No architecture for {model_name} — run training first.",
+            className="text-muted",
+        )
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        return html.Pre(
+            text,
+            style={
+                "fontSize": "11px",
+                "overflow": "auto",
+                "maxHeight": "70vh",
+                "backgroundColor": "#2c3e50",
+                "padding": "12px",
+                "borderRadius": "4px",
+            },
+        )
+    except Exception as exc:
+        logger.debug("Failed to load model arch: %s", exc)
+        return html.P("Could not load architecture.", className="text-muted")
+
+
+@app.callback(
     Output("metrics-table", "children"),
     Input("tick", "n_intervals"),
 )
@@ -186,8 +284,7 @@ def update_raw_table(_):
     if df.empty:
         return html.P("No metrics yet — start a training run.",
                        className="text-muted")
-    return dbc.Table.from_dataframe(df, striped=True, bordered=True,
-                                     hover=True, dark=True, size="sm")
+    return dbc.Table.from_dataframe(df, striped=True, bordered=True, hover=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -195,6 +292,7 @@ def update_raw_table(_):
 # ══════════════════════════════════════════════════════════════════════════
 
 def run_dashboard(port: int = DASHBOARD_PORT, debug: bool = False):
+    logging.getLogger("werkzeug").setLevel(logging.WARNING)
     logger.info("Starting dashboard on http://localhost:%d", port)
     app.run(host="0.0.0.0", port=port, debug=debug)
 

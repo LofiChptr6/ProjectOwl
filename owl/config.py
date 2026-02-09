@@ -40,8 +40,8 @@ MASSIVE_BASE_URL = os.getenv("MASSIVE_BASE_URL", "https://api.polygon.io")
 # 2.  TIME SCALES & FREQUENCIES   ◀── EASY TO CHANGE
 # ═════════════════════════════════════════════════════════════════════════
 # How large each random "case" window is
-CASE_WINDOW_TRADING_DAYS  = 10          # ~2 weeks of trading
-CASE_WINDOW_CALENDAR_DAYS = 14          # calendar-day span used in API calls
+CASE_WINDOW_TRADING_DAYS  = 7           # ~1 week of trading
+CASE_WINDOW_CALENDAR_DAYS = 10          # calendar-day span used in API calls
 
 # Price bar frequency fed to Massive API
 PRICE_FREQUENCY   = "minute"            # "minute" | "hour" | "day"
@@ -55,19 +55,30 @@ MARKET_CLOSE_MINUTE = 0
 TRADING_MINUTES_PER_DAY = 390           # 09:30 → 16:00
 
 # ── Model input / output windows (bar counts)
-INPUT_WINDOW_MINUTES      = 1440        # 24 hours of minute bars
-PREDICTION_WINDOW_MINUTES = 360         # 6 hours to predict
-WINDOW_STRIDE             = 60          # rolling-window stride (minutes)
+# 6 trading days input + 1 trading day prediction ≈ 7 trading days total
+INPUT_WINDOW_MINUTES      = 2340        # 6 days × 390 min
+PREDICTION_WINDOW_MINUTES = 390         # 1 day  × 390 min
+WINDOW_STRIDE             = 0           # 0 = each case is one sample (no rolling)
 
 # ═════════════════════════════════════════════════════════════════════════
-# 3.  STOCK UNIVERSE
+# 3.  STOCK UNIVERSE & DATE RANGE
 # ═════════════════════════════════════════════════════════════════════════
 TOP_STOCKS_COUNT          = 1000
 MIN_MARKET_CAP            = 1e9         # USD
-DATA_START_DATE           = "2016-01-01"
-DATA_END_DATE             = "2025-12-31"
-RANDOM_CASES_TRAINING     = 500
-RANDOM_CASES_VALIDATION   = 100
+
+# Historic lookback (matches Polygon plan: 5-year or 10-year minute data)
+HISTORIC_LOOKBACK_YEARS   = 5           # 5 or 10 — only pick cases within this window
+DATA_END_DATE             = "2025-12-31"   # upper bound; actual end = min(this, today)
+
+# Ticker universe: CSV with [sector, symbol] — 200 large-cap US stocks by sector
+TICKERS_CSV_PATH          = PROJECT_ROOT / "config" / "tickers_by_sector.csv"
+RANDOM_CASES_PER_SYMBOL   = 100          # snapshots per ticker (train+val combined)
+TRAIN_VAL_RATIO           = 0.8         # 80% train, 20% val
+RANDOM_CASES_TRAINING     = None        # auto-computed from per-symbol count
+RANDOM_CASES_VALIDATION   = None        # auto-computed from per-symbol count
+
+# Multi-worker population
+POPULATE_MAX_WORKERS      = 12           # concurrent API fetch + DB insert threads
 
 # ═════════════════════════════════════════════════════════════════════════
 # 4.  TECHNICAL INDICATORS   ◀── EASY TO CHANGE
@@ -84,15 +95,17 @@ RSI_WINDOW       = 14
 # ═════════════════════════════════════════════════════════════════════════
 # 5.  NORMALIZATION   ◀── EASY TO CHANGE
 # ═════════════════════════════════════════════════════════════════════════
-NORMALIZATION_METHOD  = "revol"         # "revol" | "zscore" | "minmax" | "log_return"
-VOLUME_NORMALIZATION  = "log_zscore"    # "log_zscore" | "zscore" | "minmax"
+NORMALIZATION_METHOD  = "first_open"         # "first_open" | "revol" | "zscore" | "minmax" | "log_return"
+VOLUME_NORMALIZATION  = "log_first60"    # "log_zscore" | "zscore" | "minmax" | "log_first60"
+NUM_TRANSACTIONS_NORMALIZATION = "log_first60"  # "log_zscore" | "zscore" | "minmax" | "log_first60"
+MARKETCAP_PE_NORMALIZATION = "log_first60"  # "log_first60" | "log_zscore" | "zscore" | "minmax"
 
 # ═════════════════════════════════════════════════════════════════════════
 # 6.  MODEL ARCHITECTURE   ◀── EASY TO CHANGE
 # ═════════════════════════════════════════════════════════════════════════
-NUM_CATEGORIES       = 5
-CATEGORY_THRESHOLDS  = [-0.02, -0.005, 0.005, 0.02]
-CATEGORY_NAMES       = ["strong_down", "down", "flat", "up", "strong_up"]
+NUM_CATEGORIES       = 10
+# No pre-set thresholds; feeder derives from NUM_CATEGORIES (evenly spaced)
+CATEGORY_NAMES       = [f"cat_{i}" for i in range(NUM_CATEGORIES)]
 
 # CNN
 CNN_CHANNELS     = [64, 128, 256, 512]
@@ -107,6 +120,10 @@ TRANSFORMER_DROPOUT    = 0.1
 
 # Shared
 LATENT_DIM = 128                        # embedding dimension for t-SNE
+
+# Path-based clustering (unsupervised; no return thresholds)
+NUM_CLUSTERS       = 10                  # number of path types to discover
+CLUSTER_OUTPUT_DIR = PROJECT_ROOT / "outputs" / "clusters"
 
 # ═════════════════════════════════════════════════════════════════════════
 # 7.  TRAINING
@@ -135,7 +152,7 @@ VIDEO_DURATION_SEC   = 30
 # 9.  ORCHESTRATION DASHBOARD
 # ═════════════════════════════════════════════════════════════════════════
 DASHBOARD_PORT              = 8050
-DASHBOARD_UPDATE_INTERVAL_MS = 1000
+DASHBOARD_UPDATE_INTERVAL_MS = 3000
 METRICS_QUEUE_SIZE          = 10_000
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -145,6 +162,17 @@ TRAINING_TABLE   = "training_cases"
 VALIDATION_TABLE = "validation_cases"
 META_TABLE       = "case_metadata"
 METRICS_TABLE    = "training_metrics"
+
+# Hourly frequency (separate tables & windows)
+TRAINING_TABLE_HOURLY   = "training_cases_hourly"
+VALIDATION_TABLE_HOURLY = "validation_cases_hourly"
+META_TABLE_HOURLY       = "case_metadata_hourly"
+PRICE_FREQUENCY_HOURLY  = "hour"
+PRICE_MULTIPLIER_HOURLY = 1
+TRADING_HOURS_PER_DAY   = 7            # 9:30–16:00 ≈ 7 bars
+INPUT_WINDOW_BARS_HOURLY      = 42     # 6 days × 7 hrs
+PREDICTION_WINDOW_BARS_HOURLY = 7      # 1 day  × 7 hrs
+WINDOW_STRIDE_HOURLY          = 0
 
 # ═════════════════════════════════════════════════════════════════════════
 # 11. SHARADAR COLUMNS TO PULL   ◀── EASY TO CHANGE

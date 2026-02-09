@@ -135,8 +135,37 @@ class ValidationCase(_CaseBase):
     )
 
 
+class TrainingCaseHourly(_CaseBase):
+    __tablename__ = "training_cases_hourly"
+    __table_args__ = (
+        UniqueConstraint("case_id", "symbol", "timestamp", name="uq_train_hourly"),
+        Index("idx_train_hourly_case_id", "case_id"),
+        Index("idx_train_hourly_symbol", "symbol"),
+    )
+
+
+class ValidationCaseHourly(_CaseBase):
+    __tablename__ = "validation_cases_hourly"
+    __table_args__ = (
+        UniqueConstraint("case_id", "symbol", "timestamp", name="uq_val_hourly"),
+        Index("idx_val_hourly_case_id", "case_id"),
+        Index("idx_val_hourly_symbol", "symbol"),
+    )
+
+
 class CaseMetadata(Base):
     __tablename__ = "case_metadata"
+    id         = Column(Integer, primary_key=True, autoincrement=True)
+    case_id    = Column(String(64), nullable=False, unique=True, index=True)
+    symbol     = Column(String(16), nullable=False)
+    start_date = Column(DateTime, nullable=False)
+    end_date   = Column(DateTime, nullable=False)
+    split      = Column(String(16), nullable=False)   # "train" | "validation"
+    num_rows   = Column(Integer)
+
+
+class CaseMetadataHourly(Base):
+    __tablename__ = "case_metadata_hourly"
     id         = Column(Integer, primary_key=True, autoincrement=True)
     case_id    = Column(String(64), nullable=False, unique=True, index=True)
     symbol     = Column(String(16), nullable=False)
@@ -182,6 +211,16 @@ def get_case_ids(table_name: str) -> list[str]:
     return df["case_id"].tolist()
 
 
+def get_symbol_for_case(case_id: str, meta_table: str = "case_metadata") -> str | None:
+    """Return symbol for *case_id* from metadata table, or None if not found."""
+    engine = get_engine()
+    df = pd.read_sql(
+        f"SELECT symbol FROM {meta_table} WHERE case_id = %(cid)s",
+        engine, params={"cid": case_id},
+    )
+    return df["symbol"].iloc[0] if not df.empty else None
+
+
 def get_case_row_count(case_id: str, table_name: str) -> int:
     engine = get_engine()
     df = pd.read_sql(
@@ -205,16 +244,30 @@ def insert_case_data(df: pd.DataFrame, table_name: str,
     engine = get_engine()
     df.to_sql(table_name, engine, if_exists=if_exists, index=False,
               method="multi", chunksize=1000)
-    logger.info("Inserted %d rows into %s", len(df), table_name)
+    logger.debug("Inserted %d rows into %s", len(df), table_name)
 
 
-def insert_metadata(case_id, symbol, start_date, end_date, split, num_rows):
+def insert_metadata(case_id, symbol, start_date, end_date, split, num_rows,
+                    meta_table: str = "case_metadata"):
+    """Insert case metadata. Use meta_table='case_metadata_hourly' for hourly pipeline."""
+    if meta_table == "case_metadata_hourly":
+        cls = CaseMetadataHourly
+    else:
+        cls = CaseMetadata
     with get_session() as sess:
-        sess.add(CaseMetadata(
+        sess.add(cls(
             case_id=case_id, symbol=symbol,
             start_date=start_date, end_date=end_date,
             split=split, num_rows=num_rows,
         ))
+
+
+def clear_training_metrics() -> None:
+    """Truncate training_metrics so dashboard shows only the current run."""
+    engine = get_engine()
+    with engine.connect() as conn:
+        conn.execute(text("TRUNCATE TABLE training_metrics"))
+        conn.commit()
 
 
 def log_metric(model_name: str, epoch: int, batch: int,

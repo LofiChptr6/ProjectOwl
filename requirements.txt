@@ -1,5 +1,6 @@
 # Core ML
 torch>=2.0
+torchinfo>=1.8
 numpy>=1.24
 pandas>=2.0
 scipy>=1.10
@@ -24,6 +25,7 @@ statsmodels>=0.14
 matplotlib>=3.7
 plotly>=5.15
 dash>=2.14
+streamlit>=1.28
 dash-bootstrap-components>=1.5
 
 # Utilities

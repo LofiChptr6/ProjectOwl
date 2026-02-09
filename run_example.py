@@ -2,20 +2,20 @@
 """
 ProjectOwl — End-to-end example
 =================================
-Runs the full pipeline in miniature so you can verify every component works:
+Runs the full pipeline (training + reports + t-SNE). Requires the DB to be
+populated first via ``python scripts/populate_data.py``.
 
-  1. Init database tables
-  2. Populate a small number of random cases
+  1. Check for existing case IDs in DB (exit if empty)
+  2. Init tables if needed
   3. Train a CNN (few epochs)
   4. Generate reports & t-SNE plots
-  5. (Optional) launch the live dashboard
-
-Adjust the constants below for a quick smoke-test vs. a longer run.
+  5. Live dashboard (default): worker load vs training ingestion at http://localhost:8050
 
 Usage::
 
+    python scripts/populate_data.py       # run first to populate DB
     python run_example.py
-    python run_example.py --dashboard     # also start live monitoring
+    python run_example.py --no-dashboard # skip live monitoring
     python run_example.py --model transformer
 """
 
@@ -23,6 +23,7 @@ import argparse
 import logging
 import sys
 import threading
+import webbrowser
 
 logging.basicConfig(
     level=logging.INFO,
@@ -32,49 +33,54 @@ logger = logging.getLogger("run_example")
 
 
 # ── Tuneables for the example run ─────────────────────────────────────────
-EXAMPLE_TICKERS  = ["AAPL", "MSFT", "NVDA", "GOOGL", "AMZN"]
-EXAMPLE_N_TRAIN  = 10       # small for quick iteration
-EXAMPLE_N_VAL    = 3
-EXAMPLE_EPOCHS   = 5
-EXAMPLE_BATCH    = 16
-EXAMPLE_WORKERS  = 0        # 0 = main-process loading (safer on Windows)
+EXAMPLE_EPOCHS   = 1
+EXAMPLE_BATCH    = 3
+EXAMPLE_WORKERS  = 10        # 0 = main-process loading (safer on Windows)
 
 
 def main():
     parser = argparse.ArgumentParser(description="ProjectOwl end-to-end example")
     parser.add_argument("--model", choices=["cnn", "transformer"], default="cnn")
-    parser.add_argument("--dashboard", action="store_true")
-    parser.add_argument("--skip-populate", action="store_true",
-                        help="Skip data population (re-use existing DB data)")
+    parser.add_argument("--dashboard", action="store_true",
+                        help="Launch live monitoring dashboard (default: True)")
+    parser.add_argument("--no-dashboard", action="store_true",
+                        help="Do not launch the dashboard")
     args = parser.parse_args()
+    use_dashboard = args.dashboard or not args.no_dashboard
 
-    # ── 0. Optional: dashboard ────────────────────────────────────────────
-    if args.dashboard:
+    # ── 0. Live dashboard (worker load vs training ingestion) ─────────────
+    if use_dashboard:
+        from owl.config import DASHBOARD_PORT
         from owl.orchestration.dashboard import run_dashboard
+        url = f"http://localhost:{DASHBOARD_PORT}"
         t = threading.Thread(target=run_dashboard, kwargs={"debug": False},
                              daemon=True)
         t.start()
-        logger.info("Dashboard → http://localhost:8050")
+        logger.info("Dashboard (worker load vs ingestion) → %s", url)
+        # Give the server a moment to bind, then open browser
+        def _open():
+            import time
+            time.sleep(1.5)
+            webbrowser.open(url)
+        threading.Thread(target=_open, daemon=True).start()
 
-    # ── 1. Init database ─────────────────────────────────────────────────
-    logger.info("Step 1 — Initialising database tables…")
-    from owl.data.db import create_tables
+    # ── 1. Check DB has data; init tables if needed ───────────────────────
+    from owl.data.db import clear_training_metrics, create_tables, get_case_ids
+    from owl.config import TRAINING_TABLE, VALIDATION_TABLE
+
     create_tables()
-
-    # ── 2. Populate ──────────────────────────────────────────────────────
-    if not args.skip_populate:
-        logger.info("Step 2 — Populating training & validation cases…")
-        from owl.data.query_engine import populate_database
-        populate_database(
-            n_train=EXAMPLE_N_TRAIN,
-            n_val=EXAMPLE_N_VAL,
-            tickers=EXAMPLE_TICKERS,
+    clear_training_metrics()  # fresh charts for this run only
+    train_ids = get_case_ids(TRAINING_TABLE)
+    val_ids = get_case_ids(VALIDATION_TABLE)
+    if not train_ids or not val_ids:
+        logger.error(
+            "No case data in DB. Populate first: python scripts/populate_data.py"
         )
-    else:
-        logger.info("Step 2 — Skipped (--skip-populate)")
+        sys.exit(1)
+    logger.info("Step 1 — Found %d training + %d validation cases", len(train_ids), len(val_ids))
 
-    # ── 3. Build DataLoaders ─────────────────────────────────────────────
-    logger.info("Step 3 — Building data loaders + preprocessing pipeline…")
+    # ── 2. Build DataLoaders ─────────────────────────────────────────────
+    logger.info("Step 2 — Building data loaders + preprocessing pipeline…")
     from owl.data.feeder import make_dataloaders
     from owl.preprocessing.pipeline import PreprocessingPipeline
 
@@ -90,7 +96,7 @@ def main():
                 len(train_loader.dataset), len(val_loader.dataset))
 
     # ── 4. Train ─────────────────────────────────────────────────────────
-    logger.info("Step 4 — Training %s model for %d epochs…",
+    logger.info("Step 3 — Training %s model for %d epochs…",
                 args.model.upper(), EXAMPLE_EPOCHS)
     from owl.data.db import log_metric
 
@@ -106,8 +112,14 @@ def main():
     def _cb(m):
         try:
             log_metric(args.model, m.get("epoch", 0), m.get("batch", 0),
+                       "train_loss", m.get("train_loss", 0), m.get("phase", "train"))
+            log_metric(args.model, m.get("epoch", 0), m.get("batch", 0),
                        "throughput_rows_per_sec",
                        m.get("throughput_rows_per_sec", 0), m.get("phase", "train"))
+            log_metric(args.model, m.get("epoch", 0), m.get("batch", 0),
+                       "data_wait_sec", m.get("data_wait_sec", 0), m.get("phase", "train"))
+            log_metric(args.model, m.get("epoch", 0), m.get("batch", 0),
+                       "compute_sec", m.get("compute_sec", 0), m.get("phase", "train"))
         except Exception:
             pass
 
@@ -118,10 +130,11 @@ def main():
     )
 
     # ── 5. Reports ───────────────────────────────────────────────────────
-    logger.info("Step 5 — Generating reports…")
+    logger.info("Step 4 — Generating reports…")
     from owl.config import REPORT_DIR
     from owl.visualization.reports import (
         plot_category_examples,
+        plot_category_overlay,
         plot_feature_importance,
         plot_training_history,
     )
@@ -132,27 +145,60 @@ def main():
     plot_training_history(history, title=f"{args.model.upper()} Training",
                           save_path=report_dir / "training_history.png")
 
-    sample_batch, _ = next(iter(val_loader))
+    batch = next(iter(val_loader))
+    sector_idx = batch[2] if len(batch) > 2 else None
+
+    # Save model architecture summary for dashboard
+    try:
+        from torchinfo import summary
+        x = batch[0][:1].to(trainer.device)
+        sec = batch[2][:1].to(trainer.device).long() if len(batch) > 2 else None
+        s = summary(
+            trainer.model,
+            input_data=(x,) if sec is None else (x, sec),
+            col_names=("input_size", "output_size", "num_params"),
+            depth=4,
+            verbose=0,
+        )
+        (report_dir / "model_arch.txt").write_text(str(s), encoding="utf-8")
+    except Exception as e:
+        logger.warning("Could not save model arch: %s", e)
+
     plot_feature_importance(
-        trainer.model, sample_batch,
+        trainer.model, batch[0],
         feature_names=pipeline.feature_columns,
         device=trainer.device,
         save_path=report_dir / "feature_importance.png",
+        sector_idx=sector_idx,
     )
     plot_category_examples(val_loader.dataset,
                            save_path=report_dir / "category_examples.png")
+    plot_category_overlay(val_loader.dataset,
+                          save_path=report_dir / "category_overlay.png")
 
-    # ── 6. t-SNE ─────────────────────────────────────────────────────────
-    logger.info("Step 6 — t-SNE visualisation…")
+    # ── 6. Label Gantt (API-fetched, same time axis) ──────────────────────
+    try:
+        from owl.visualization.gantt import run_label_gantt
+        if run_label_gantt(trainer, pipeline, n_symbols=20, days=14, save_path=report_dir / "label_gantt.png"):
+            logger.info("Label Gantt → %s", report_dir / "label_gantt.png")
+    except Exception as e:
+        logger.warning("Skipping Gantt chart (API may be needed): %s", e)
+
+    # ── 7. t-SNE (with trajectory lines) ──────────────────────────────────
+    logger.info("Step 5 — t-SNE visualisation…")
     import numpy as np
     from owl.models.tsne_viz import compute_tsne, plot_tsne_2d, plot_tsne_3d
 
-    latents, labels = trainer.extract_latents(val_loader)
+    latents, labels, symbols, timestamps = trainer.extract_latents_with_metadata(
+        val_loader.dataset, max_samples=1500
+    )
     if len(latents) > 0:
         emb2 = compute_tsne(latents, n_components=2)
         emb3 = compute_tsne(latents, n_components=3)
-        plot_tsne_2d(emb2, labels, save_path=report_dir / "tsne_2d.png")
-        plot_tsne_3d(emb3, labels, save_path=report_dir / "tsne_3d.png")
+        plot_tsne_2d(emb2, labels, symbols=symbols, timestamps=timestamps,
+                     save_path=report_dir / "tsne_2d.png")
+        plot_tsne_3d(emb3, labels, symbols=symbols, timestamps=timestamps,
+                     save_path=report_dir / "tsne_3d.png")
     else:
         logger.warning("No latent vectors — skipping t-SNE")
 

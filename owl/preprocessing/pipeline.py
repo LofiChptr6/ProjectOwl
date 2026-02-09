@@ -22,6 +22,7 @@ from owl.config import (
 from owl.preprocessing.features import add_all_features
 from owl.preprocessing.normalizer import (
     normalize_fundamentals,
+    normalize_num_transactions,
     normalize_prices,
     normalize_volume,
 )
@@ -65,22 +66,30 @@ class PreprocessingPipeline:
         # 2 ── normalise volume ────────────────────────────────────────────
         df, _vol_meta = normalize_volume(df)
 
-        # 3 ── normalise fundamentals (z-score per window) ─────────────────
+        # 3 ── normalise num_transactions (log1p + z-score) ─────────────────
+        df = normalize_num_transactions(df)
+
+        # 4 ── normalise fundamentals (z-score per window) ─────────────────
         fund_cols = [c for c in FUNDAMENTAL_COLUMNS if c in df.columns]
         df = normalize_fundamentals(df, fund_cols)
 
-        # 4 ── feature engineering (MAs, ARMA, GARCH, time, …) ─────────────
+        # 5 ── feature engineering (MAs, ARMA, GARCH, time, …) ─────────────
         df = add_all_features(df)
 
-        # 5 ── fill remaining NaNs ─────────────────────────────────────────
+        # 6 ── fill remaining NaNs ─────────────────────────────────────────
         numeric_cols = df.select_dtypes(include=[np.number]).columns
         df[numeric_cols] = df[numeric_cols].ffill().bfill().fillna(0)
 
-        # 6 ── determine feature columns ───────────────────────────────────
-        self._feature_columns = [
-            c for c in df.columns
-            if c not in _META_COLS and df[c].dtype in (np.float64, np.float32, np.int64, np.int32, float, int)
-        ]
+        # 7 ── determine feature columns (once, so all cases use same columns)
+        if self._feature_columns is None:
+            self._feature_columns = [
+                c for c in df.columns
+                if c not in _META_COLS and df[c].dtype in (np.float64, np.float32, np.int64, np.int32, float, int)
+            ]
+        # Ensure every case has the same feature columns (fill missing with 0)
+        for c in self._feature_columns:
+            if c not in df.columns:
+                df[c] = 0.0
 
         return df
 

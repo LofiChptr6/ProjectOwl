@@ -13,6 +13,7 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 from matplotlib.figure import Figure
 from sklearn.manifold import TSNE
 
@@ -30,6 +31,29 @@ logger = logging.getLogger(__name__)
 
 # colour palette for categories
 _PALETTE = plt.cm.RdYlGn(np.linspace(0.1, 0.9, NUM_CATEGORIES))
+
+
+def _draw_trajectory_lines(ax, embedding, symbols, timestamps, is_3d: bool = False):
+    """Draw thin lines connecting points in time order, per symbol."""
+    df = pd.DataFrame({
+        "x": embedding[:, 0],
+        "y": embedding[:, 1],
+        "z": embedding[:, 2] if embedding.shape[1] > 2 else 0,
+        "symbol": symbols,
+        "ts": pd.to_datetime(timestamps, errors="coerce"),
+    })
+    df = df.dropna(subset=["ts"])
+    for sym, grp in df.groupby("symbol"):
+        grp = grp.sort_values("ts").reset_index(drop=True)
+        if len(grp) < 2:
+            continue
+        x = grp["x"].values
+        y = grp["y"].values
+        if is_3d and "z" in grp.columns:
+            z = grp["z"].values
+            ax.plot(x, y, z, color="gray", alpha=0.35, linewidth=0.5)
+        else:
+            ax.plot(x, y, color="gray", alpha=0.35, linewidth=0.5)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -68,8 +92,10 @@ def plot_tsne_2d(
     labels: np.ndarray,
     title: str = "t-SNE 2D",
     save_path: str | Path | None = None,
+    symbols: list[str] | None = None,
+    timestamps: list | None = None,
 ) -> Figure:
-    """2-D scatter coloured by category label."""
+    """2-D scatter coloured by category label. Optionally draw trajectory lines per symbol."""
     fig, ax = plt.subplots(figsize=(10, 8))
     for cat in range(NUM_CATEGORIES):
         mask = labels == cat
@@ -79,6 +105,8 @@ def plot_tsne_2d(
             c=[_PALETTE[cat]], label=name,
             alpha=0.6, s=12, edgecolors="none",
         )
+    if symbols is not None and timestamps is not None and len(symbols) == len(embedding):
+        _draw_trajectory_lines(ax, embedding, symbols, timestamps, is_3d=False)
     ax.set_title(title, fontsize=14)
     ax.legend(fontsize=9, markerscale=2)
     ax.set_xlabel("t-SNE 1")
@@ -98,8 +126,10 @@ def plot_tsne_3d(
     save_path: str | Path | None = None,
     elev: float = 25,
     azim: float = 135,
+    symbols: list[str] | None = None,
+    timestamps: list | None = None,
 ) -> Figure:
-    """3-D scatter coloured by category label."""
+    """3-D scatter coloured by category label. Optionally draw trajectory lines per symbol."""
     fig = plt.figure(figsize=(12, 9))
     ax = fig.add_subplot(111, projection="3d")
     for cat in range(NUM_CATEGORIES):
@@ -110,6 +140,8 @@ def plot_tsne_3d(
             c=[_PALETTE[cat]], label=name,
             alpha=0.6, s=12, edgecolors="none",
         )
+    if symbols is not None and timestamps is not None and len(symbols) == len(embedding):
+        _draw_trajectory_lines(ax, embedding, symbols, timestamps, is_3d=True)
     ax.set_title(title, fontsize=14)
     ax.legend(fontsize=9, markerscale=2)
     ax.view_init(elev=elev, azim=azim)

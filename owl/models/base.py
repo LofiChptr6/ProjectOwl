@@ -145,26 +145,70 @@ class BaseTrainer:
         self.model.eval()
         self.model.to(self.device)
         latents, labels = [], []
-        for X, y in loader:
+        for batch in loader:
+            X, y = batch[0], batch[1]
             X = X.to(self.device)
-            z = self.model.encode(X)             # sub-classes implement this
+            z = self.model.encode(X)             # sector not used for latent
             latents.append(z.cpu().numpy())
             labels.append(y.numpy() if isinstance(y, torch.Tensor) else np.array(y))
         return np.concatenate(latents), np.concatenate(labels)
+
+    @torch.no_grad()
+    def extract_latents_with_metadata(
+        self, dataset, max_samples: int | None = None
+    ) -> tuple[np.ndarray, np.ndarray, list[str], list]:
+        """Return (latents, labels, symbols, timestamps) for trajectory plotting.
+
+        Requires dataset with get_sample_for_plot(idx).
+        """
+        self.model.eval()
+        self.model.to(self.device)
+        if not hasattr(dataset, "get_sample_for_plot"):
+            raise ValueError("Dataset must have get_sample_for_plot for trajectory metadata")
+        n = len(dataset)
+        if max_samples is not None:
+            n = min(n, max_samples)
+        latents, labels, symbols, timestamps = [], [], [], []
+        for idx in range(n):
+            sample = dataset[idx]
+            X = sample[0]
+            if isinstance(X, torch.Tensor):
+                X = X.unsqueeze(0).to(self.device)
+            else:
+                X = torch.from_numpy(np.asarray(X)).float().unsqueeze(0).to(self.device)
+            z = self.model.encode(X)
+            latent = z.cpu().numpy()[0]
+            lab = sample[1]
+            lab_val = lab.item() if hasattr(lab, "item") else int(lab)
+            _, _, symbol, start_ts, _, _ = dataset.get_sample_for_plot(idx)
+            latents.append(latent)
+            labels.append(lab_val)
+            symbols.append(str(symbol) if symbol else "")
+            timestamps.append(start_ts)
+        return (
+            np.array(latents),
+            np.array(labels),
+            symbols,
+            timestamps,
+        )
 
     # ── internal ──────────────────────────────────────────────────────────
 
     def _train_one_epoch(self, loader, optimiser, epoch):
         self.model.train()
         total_loss, correct, total = 0.0, 0, 0
-        t_batch = time.time()
+        t_after_prev = time.time()
 
-        for batch_idx, (X, y) in enumerate(tqdm(
-                loader, desc=f"Train {epoch}", leave=False)):
+        for batch_idx, batch in enumerate(tqdm(loader, desc=f"Train {epoch}", leave=False)):
+            t_iter_start = time.time()
+            data_wait_sec = t_iter_start - t_after_prev
+
+            X, y = batch[0], batch[1]
+            sector_idx = batch[2].to(self.device).long() if len(batch) > 2 else None
             X = X.to(self.device, non_blocking=True)
             y = y.to(self.device, non_blocking=True).long()
 
-            logits = self.model(X)
+            logits = self.model(X, sector_idx=sector_idx)
             loss   = self.criterion(logits, y)
 
             optimiser.zero_grad(set_to_none=True)
@@ -177,22 +221,29 @@ class BaseTrainer:
             correct    += (logits.argmax(1) == y).sum().item()
             total      += bs
 
-            # metrics callback
+            compute_sec = time.time() - t_iter_start
+            t_after_prev = time.time()
+
+            # metrics callback (data_wait_sec = worker fetch delay; compute_sec = GPU time)
             if self._metrics_callback is not None:
-                elapsed = time.time() - t_batch
                 self._metrics_callback({
                     "epoch": epoch, "batch": batch_idx,
                     "train_loss": loss.item(),
                     "phase": "train",
-                    "throughput_rows_per_sec": bs / max(elapsed, 1e-6),
+                    "throughput_rows_per_sec": bs / max(compute_sec, 1e-6),
+                    "data_wait_sec": data_wait_sec,
+                    "compute_sec": compute_sec,
                 })
-                t_batch = time.time()
 
             # DB logging (every 50 batches to avoid overhead)
             if batch_idx % 50 == 0:
                 try:
                     log_metric(self.model_name, epoch, batch_idx,
                                "train_loss", loss.item(), "train")
+                    log_metric(self.model_name, epoch, batch_idx,
+                               "data_wait_sec", data_wait_sec, "train")
+                    log_metric(self.model_name, epoch, batch_idx,
+                               "compute_sec", compute_sec, "train")
                 except Exception:
                     pass
 
@@ -202,10 +253,12 @@ class BaseTrainer:
     def _validate(self, loader, epoch):
         self.model.eval()
         total_loss, correct, total = 0.0, 0, 0
-        for X, y in loader:
+        for batch in loader:
+            X, y = batch[0], batch[1]
+            sector_idx = batch[2].to(self.device).long() if len(batch) > 2 else None
             X = X.to(self.device, non_blocking=True)
             y = y.to(self.device, non_blocking=True).long()
-            logits = self.model(X)
+            logits = self.model(X, sector_idx=sector_idx)
             loss   = self.criterion(logits, y)
             bs = X.size(0)
             total_loss += loss.item() * bs

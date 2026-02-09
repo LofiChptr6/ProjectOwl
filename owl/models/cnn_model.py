@@ -26,6 +26,7 @@ from owl.config import (
     NUM_CATEGORIES,
 )
 from owl.models.base import BaseTrainer
+from owl.models.sector_embedding import SectorEmbedding
 
 
 # ── building blocks ───────────────────────────────────────────────────────
@@ -84,10 +85,13 @@ class TimeSeriesCNN(nn.Module):
                  channels: list[int] | None = None,
                  kernel_sizes: list[int] | None = None,
                  latent_dim: int = LATENT_DIM,
-                 num_classes: int = NUM_CATEGORIES):
+                 num_classes: int = NUM_CATEGORIES,
+                 use_sector: bool = True,
+                 sector_embed_dim: int = 32):
         super().__init__()
         channels     = channels or CNN_CHANNELS
         kernel_sizes = kernel_sizes or CNN_KERNEL_SIZES
+        self.use_sector = use_sector
 
         layers: list[nn.Module] = []
 
@@ -113,20 +117,26 @@ class TimeSeriesCNN(nn.Module):
             nn.GELU(),
         )
 
-        # classification head
+        if use_sector:
+            self.sector_embed = SectorEmbedding(embed_dim=sector_embed_dim)
+            classifier_in = latent_dim + sector_embed_dim
+        else:
+            self.sector_embed = None
+            classifier_in = latent_dim
+
         self.classifier = nn.Sequential(
             nn.Dropout(0.3),
-            nn.Linear(latent_dim, num_classes),
+            nn.Linear(classifier_in, num_classes),
         )
 
     # ──────────────────────────────────────────────────────────────────────
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, sector_idx: torch.Tensor | None = None) -> torch.Tensor:
         """
         Parameters
         ----------
         x : (B, T, F)  — batch of time-series windows
-            T = INPUT_WINDOW_MINUTES, F = in_features
+        sector_idx : (B,) optional — sector token indices (when use_sector=True)
 
         Returns
         -------
@@ -134,10 +144,13 @@ class TimeSeriesCNN(nn.Module):
         """
         x = x.transpose(1, 2)                  # → (B, F, T) for Conv1d
         z = self.encode_from_conv(x)
+        if self.sector_embed is not None and sector_idx is not None:
+            s = self.sector_embed(sector_idx)
+            z = torch.cat([z, s], dim=1)
         return self.classifier(z)
 
-    def encode(self, x: torch.Tensor) -> torch.Tensor:
-        """Return the latent vector (for t-SNE)."""
+    def encode(self, x: torch.Tensor, sector_idx: torch.Tensor | None = None) -> torch.Tensor:
+        """Return the latent vector (for t-SNE). Sector not included in latent."""
         x = x.transpose(1, 2)
         return self.encode_from_conv(x)
 

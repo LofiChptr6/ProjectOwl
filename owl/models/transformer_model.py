@@ -109,11 +109,12 @@ class TimeSeriesTransformer(nn.Module):
 
     # ──────────────────────────────────────────────────────────────────────
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, sector_idx: torch.Tensor | None = None) -> torch.Tensor:
         """
         Parameters
         ----------
         x : (B, T, F)
+        sector_idx : optional, ignored (add SectorEmbedding for full support)
 
         Returns
         -------

@@ -1,16 +1,18 @@
 #!/usr/bin/env python
-"""Populate the training & validation tables with random cases.
+"""Populate the hourly training & validation tables with random cases.
 
-Run this before run_example.py or scripts/train.py. Uses config/tickers_by_sector.csv
-when --tickers is not specified.
+Same logic as populate_data.py but fetches by-hour bars from Polygon and
+stores in training_cases_hourly / validation_cases_hourly / case_metadata_hourly.
+For each symbol, cases are generated in pairs that overlap by >= 50% of the window.
+
+Run before run_example_hourly.py.
 
 Usage::
 
-    python scripts/populate_data.py                            # defaults from config
-    python scripts/populate_data.py --cases-per-symbol 12      # more snapshots
-    python scripts/populate_data.py --tickers AAPL MSFT NVDA   # specific stocks
-    python scripts/populate_data.py --workers 16               # faster population
-    python scripts/populate_data.py --n-train 50 --n-val 10    # legacy global counts
+    python scripts/populate_data_hourly.py
+    python scripts/populate_data_hourly.py --cases-per-symbol 12
+    python scripts/populate_data_hourly.py --tickers AAPL MSFT NVDA
+    python scripts/populate_data_hourly.py --workers 16
 """
 
 import argparse
@@ -23,18 +25,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from owl.data.db import create_tables
 from owl.data.query_engine import populate_database
 
-query_workers = 16
 
 def main():
-    parser = argparse.ArgumentParser(description="Populate ProjectOwl DB")
+    parser = argparse.ArgumentParser(description="Populate ProjectOwl hourly DB")
     parser.add_argument("--cases-per-symbol", type=int, default=None,
                         help="Random snapshots per ticker (default from config)")
     parser.add_argument("--workers", type=int, default=None,
-                        help="Max concurrent fetch+insert workers (default from config)")
+                        help="Max concurrent fetch+insert workers")
     parser.add_argument("--n-train", type=int, default=None,
-                        help="(Legacy) Total training cases — overrides per-symbol strategy")
+                        help="(Legacy) Total training cases")
     parser.add_argument("--n-val", type=int, default=None,
-                        help="(Legacy) Total validation cases — overrides per-symbol strategy")
+                        help="(Legacy) Total validation cases")
     parser.add_argument("--tickers", nargs="+", default=None,
                         help="Restrict to specific ticker symbols")
     args = parser.parse_args()
@@ -42,7 +43,6 @@ def main():
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s  %(levelname)-8s  %(message)s")
 
-    # ensure tables exist
     create_tables()
 
     populate_database(
@@ -50,9 +50,12 @@ def main():
         n_val=args.n_val,
         tickers=args.tickers,
         cases_per_symbol=args.cases_per_symbol,
-        max_workers=query_workers
+        max_workers=args.workers,
+        frequency="hour",
+        overlap_pairs=True,
+        overlap_fraction=0.5,
     )
-    logging.info("Population complete.")
+    logging.info("Hourly population complete.")
 
 
 if __name__ == "__main__":
